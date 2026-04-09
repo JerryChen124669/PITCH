@@ -19,7 +19,34 @@ import umap
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import cross_val_score
 import re
+import psutil
+import os
+from functools import wraps
 
+# --- RAM TRACKER ---
+def track_ram(func):
+    """A decorator that measures how much RAM a function uses."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # 1. Get RAM before function runs
+        process = psutil.Process(os.getpid())
+        mem_before = process.memory_info().rss / (1024 ** 2) # Convert bytes to MB
+        
+        # 2. Run the actual function
+        result = func(*args, **kwargs)
+        
+        # 3. Get RAM after function finishes
+        mem_after = process.memory_info().rss / (1024 ** 2)
+        diff = mem_after - mem_before
+        
+        # 4. Display a pop-up message in the bottom right corner of the app!
+        st.toast(f"🧠 **{func.__name__}** used **{diff:.2f} MB** (Total Server RAM: {mem_after:.2f} MB)")
+        
+        # Also print to the terminal logs just in case
+        print(f"RAM Tracker -> {func.__name__} used {diff:.2f} MB | Total: {mem_after:.2f} MB")
+        
+        return result
+    return wrapper
 # --- CACHED ML FUNCTIONS TO PREVENT LAG ---
 
 @st.cache_resource(show_spinner="Training PyTorch model...")
