@@ -50,6 +50,7 @@ def track_ram(func):
 # --- CACHED ML FUNCTIONS TO PREVENT LAG ---
 
 @st.cache_resource(show_spinner="Training PyTorch model...")
+@track_ram
 def train_pytorch_model(model_type, input_size, hidden_size, dropout, lr, weight_decay, epochs, seed, X_train, y_train):
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -93,6 +94,7 @@ def evaluate_pytorch_model(model, X_test, y_test):
     return test_preds, corr
 
 @st.cache_data(show_spinner="Calculating Integrated Gradients (This may take a moment)...")
+@track_ram
 def calculate_ig(_model, X_raw):
     _model.eval()
     ig = IntegratedGradients(_model, multiply_by_inputs=False)
