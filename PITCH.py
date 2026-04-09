@@ -15,7 +15,6 @@ import networkx as nx
 import io
 from io import BytesIO
 import shap
-#from imblearn.under_sampling import RandomUnderSampler
 import umap
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import cross_val_score
@@ -49,10 +48,16 @@ def train_pytorch_model(model_type, input_size, hidden_size, dropout, lr, weight
         optimizer.step()
         
     model.eval()
+    
+    # FIX 3: PyTorch Memory Optimization
+    # Delete the tensors from memory and clear the cache before returning the model
+    del X_t
+    del y_t
+    import gc
+    gc.collect()
+    
     return model
 
-# FIX 1: Removed @st.cache_data here and changed _model to model 
-# so Streamlit actually evaluates the newly trained model instead of recycling old results.
 def evaluate_pytorch_model(model, X_test, y_test):
     model.eval()
     with torch.no_grad():
@@ -82,32 +87,15 @@ def get_cached_shap_plot(attr, X_raw, headers):
     plt.xlabel('Integrated Gradient Attribution Value')
     plt.tight_layout()
     
-    # 1. Generate PNG for Streamlit's st.image()
     buf_png = io.BytesIO()
     fig.savefig(buf_png, format="png", bbox_inches="tight", dpi=150)
-    
-    # 2. Generate SVG for the download button
     buf_svg = io.BytesIO()
     fig.savefig(buf_svg, format="svg", bbox_inches="tight")
-    
     plt.close(fig) 
-    
-    # Return BOTH byte buffers
     return buf_png.getvalue(), buf_svg.getvalue()
 
-@st.cache_data
-def get_cached_bar_plot(avg_abs, headers, top_30_idx):
-    fig, ax = plt.subplots(figsize=(10, 8))
-    ax.barh(range(30), avg_abs[top_30_idx][::-1], color='steelblue')
-    ax.set_yticks(range(30))
-    ax.set_yticklabels(headers[top_30_idx][::-1])
-    ax.set_xlabel("Mean |Attribution|")
-    
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
-    plt.close(fig)
-    return buf.getvalue()
-
+# FIX 1: Matplotlib Memory Leaks
+# Updated all plotting functions below to use BytesIO and plt.close(fig)
 @st.cache_data
 def get_cached_reg_plot(y_ig_raw, y_pred, target_prot):
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -115,13 +103,17 @@ def get_cached_reg_plot(y_ig_raw, y_pred, target_prot):
     ax.plot([y_ig_raw.min(), y_ig_raw.max()], [y_ig_raw.min(), y_ig_raw.max()], 'r--', lw=2)
     ax.set_xlabel(f"Actual {target_prot} IG Score")
     ax.set_ylabel(f"Predicted {target_prot} IG")
-    return fig
+    
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
+    plt.close(fig)
+    return buf.getvalue()
 
 @st.cache_data
 def get_cached_tree_plot(_clf, tree_features): 
     fig, ax = plt.subplots(figsize=(14, 8))
     plot_tree(_clf, feature_names=tree_features, filled=True, rounded=True, 
-              precision=2, fontsize=10, impurity=False, node_ids=True,ax=ax)
+              precision=2, fontsize=10, impurity=False, node_ids=True, ax=ax)
     for text in ax.texts:
         t = text.get_text()
         match = re.search(r"value = \[(.*?)\]", t)
@@ -129,24 +121,20 @@ def get_cached_tree_plot(_clf, tree_features):
             vals = match.group(1).split(", ")
             y0, y1 = int(float(vals[0])), int(float(vals[1]))
             lines = t.split("\n")
-            
-            # lines[0] is "node #X"
-            # lines[1] is the condition if it contains "<="
             if "<=" in lines[1]:
                 header = f"{lines[0]}\n{lines[1]}"
             else:
-                header = f"{lines[0]}" # It's a leaf node, no condition
-                
+                header = f"{lines[0]}" 
             text.set_text(f"{header}\nTotal: {y0+y1}\nTarget: {y1}")
-    return fig
-
+            
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
+    plt.close(fig)
+    return buf.getvalue()
 
 @st.cache_data
 def get_cached_network_plot(_G):
     fig, ax = plt.subplots(figsize=(12, 10))
-    
-    # INCREASED k from 0.8 to 1.5 to push nodes further apart. 
-    # INCREASED iterations to 300 to let the layout settle better.
     pos = nx.spring_layout(_G, k=2, iterations=400, seed=42, weight = None) 
     edges = _G.edges()
     weights = [_G[u][v]['weight'] for u, v in edges]
@@ -157,7 +145,6 @@ def get_cached_network_plot(_G):
         min_w, max_w = 1, 1
 
     hex_colors = ['#bdbdbd', '#969696', '#737373', '#525252', '#252525', '#000000']
-    
     edge_colors = []
     edge_widths = []
     
@@ -167,40 +154,31 @@ def get_cached_network_plot(_G):
         else:
             norm_w = (w - min_w) / (max_w - min_w)
             color_idx = int(norm_w * 5.99) 
-        
         edge_colors.append(hex_colors[color_idx])
-        # Slightly scaled down max width to prevent giant thick blobs
         width = 1 + (w / max_w) * 3 
         edge_widths.append(width)
 
-    # REDUCED node size from 2500 to 1200 to give the plot breathing room
     node_size_val = 1200
-    
     nx.draw_networkx_nodes(_G, pos, ax=ax, node_color='lightblue', node_size=node_size_val)
-    # Reduced font size slightly to fit the smaller nodes
     nx.draw_networkx_labels(_G, pos, ax=ax, font_size=8, font_weight="bold")
-    
     nx.draw_networkx_edges(
-        _G, pos, ax=ax,
-        edgelist=edges,
-        width=edge_widths,
-        edge_color=edge_colors,
-        arrows=True,
-        arrowstyle='<|-|>',      
-        arrowsize=15,            
-        node_size=node_size_val, 
+        _G, pos, ax=ax, edgelist=edges, width=edge_widths, edge_color=edge_colors,
+        arrows=True, arrowstyle='<|-|>', arrowsize=15, node_size=node_size_val, 
         connectionstyle="arc3,rad=0.1" 
     )
-    
     ax.axis('off') 
     plt.tight_layout()
-    return fig
-  
+    
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
+    plt.close(fig)
+    return buf.getvalue()
+
 @st.cache_data
 def get_cached_umap(X_raw):
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_raw)
-    reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, metric='euclidean', random_state=21)
+    reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, metric='euclidean', random_state=21, low_memory=True)
     embedding = reducer.fit_transform(X_scaled)
     return embedding
 
@@ -256,7 +234,7 @@ with st.sidebar:
             hidden_size = st.slider("Hidden Size (MLP only)", 64, 512, 256)
             dropout = st.slider("Dropout Rate (MLP only)", 0.0, 0.7, 0.5)
         else:
-            hidden_size, dropout = 0, 0 # Dummy values for caching
+            hidden_size, dropout = 0, 0 
         
         lr = st.number_input("Learning Rate", value=0.0002, format="%.5f")
         weight_decay = st.number_input("Weight Decay (L2)", value=1e-4, format="%.6f")
@@ -264,7 +242,6 @@ with st.sidebar:
         
         submit_params = st.form_submit_button("✅ Update Settings")
         
-        # FIX 2: Clear old results from memory when settings are updated
         if submit_params:
             for key in ["val_results", "corr", "model", "trained_model_type"]:
                 if key in st.session_state:
@@ -296,26 +273,24 @@ with tab1:
         if st.button(f"🚀 Start {selected_model_type} Training"):
             X_train, X_test, y_train, y_test = train_test_split(X_raw, y_raw, test_size=0.2, random_state=seed)
             
-            # Use cached training function
             model = train_pytorch_model(
                 selected_model_type, X_raw.shape[1], hidden_size, dropout, 
                 lr, weight_decay, epochs, seed, X_train, y_train
             )
             
-            # Use evaluation function (now uncached!)
             test_preds, corr = evaluate_pytorch_model(model, X_test, y_test)
             
             st.session_state.model = model
             st.session_state.trained_model_type = selected_model_type 
-            st.session_state.X_raw = X_raw
-            st.session_state.X_test = X_test  # <--- NEW: Saved for UMAP generation
-            st.session_state.headers = headers
+            st.session_state.X_test = X_test  
             st.session_state.target_name = target_name
             st.session_state.corr = corr
             st.session_state.val_results = pd.DataFrame({
                 "Measured_Target": y_test,
                 "Predicted_Target": test_preds
             })
+            
+            # FIX 2: We no longer save X_raw or headers to st.session_state to save RAM.
             
             if selected_model_type == "Multilayers Perception":
                 st.session_state.step = 2
@@ -325,15 +300,12 @@ with tab1:
                 st.success(f"Training Complete! Pearson r: {corr:.4f}.")
                 st.info("Note: IG Attribution and Dependency Analysis are only available for Multilayers Perception models.")
 
-        
-
         if "val_results" in st.session_state:
             res = st.session_state.val_results
             st.divider()
             st.subheader("💾 Export Options")
             col1, col2 = st.columns(2)
             
-            # Use the saved model type for naming
             trained_type = st.session_state.get("trained_model_type", selected_model_type)
             
             buffer = io.BytesIO()
@@ -356,7 +328,6 @@ with tab1:
             st.divider()
             st.subheader("📊 Model Performance Evaluation")
 
-            # --- EXISTING SCATTER PLOT ---
             fig1, ax1 = plt.subplots(figsize=(5, 5))
             ax1.scatter(res["Measured_Target"], res["Predicted_Target"], alpha=0.5, color='teal')
             ax1.plot([res["Measured_Target"].min(), res["Measured_Target"].max()], 
@@ -365,24 +336,21 @@ with tab1:
             ax1.set_ylabel("Predicted Results")
             ax1.set_title(f"Scatter: {trained_type} Performance (r={st.session_state.corr:.4f})")
             st.pyplot(fig1)
-            plt.close(fig1) # <--- Clean up memory
+            plt.close(fig1) 
             
-            # --- NEW: SIDE-BY-SIDE UMAPS ---
             umap_col1, umap_col2 = st.columns(2)
             
-            # Generate UMAP layout using the FULL dataset (X_raw) so it matches Step 2
-            embedding_full = get_cached_umap(st.session_state.X_raw)
+            # We now use the fast, local X_raw variable!
+            embedding_full = get_cached_umap(X_raw)
             
-            # Generate predictions for the full dataset for the right-side plot
             st.session_state.model.eval()
             with torch.no_grad():
-                full_preds = st.session_state.model(torch.tensor(st.session_state.X_raw, dtype=torch.float32)).numpy()
+                full_preds = st.session_state.model(torch.tensor(X_raw, dtype=torch.float32)).numpy()
             
-            # Lock color scales so both plots match perfectly
             vmin = min(y_raw.min(), full_preds.min())
             vmax = max(y_raw.max(), full_preds.max())
             
-            with umap_col1: # LEFT: Measured Groundtruth
+            with umap_col1: 
                 fig_umap_m, ax_umap_m = plt.subplots(figsize=(6, 5))
                 scatter_m = ax_umap_m.scatter(embedding_full[:, 0], embedding_full[:, 1], 
                                               c=y_raw, cmap='viridis', 
@@ -391,9 +359,9 @@ with tab1:
                 ax_umap_m.set_title("UMAP: Measured Groundtruth (Full Data)")
                 ax_umap_m.axis('off')
                 st.pyplot(fig_umap_m)
-                plt.close(fig_umap_m) # <--- Clean up memory
+                plt.close(fig_umap_m) 
                 
-            with umap_col2: # RIGHT: Predicted Results
+            with umap_col2: 
                 fig_umap_p, ax_umap_p = plt.subplots(figsize=(6, 5))
                 scatter_p = ax_umap_p.scatter(embedding_full[:, 0], embedding_full[:, 1], 
                                               c=full_preds, cmap='viridis', 
@@ -402,143 +370,138 @@ with tab1:
                 ax_umap_p.set_title("UMAP: Predicted Results (Full Data)")
                 ax_umap_p.axis('off')
                 st.pyplot(fig_umap_p)
-                plt.close(fig_umap_p) # <--- Clean up memory
+                plt.close(fig_umap_p) 
 
     else:
         st.info("Please upload an Excel file in the sidebar to begin.")
 
 # --- STEP 2: IG ATTRIBUTION ---
 with tab2:
-    # Explicitly check if a model has been trained AND if it is an MLP
     trained_type = st.session_state.get("trained_model_type", None)
     if trained_type == "Multilayers Perception":
-        if st.button("🔍 Calculate Integrated Gradients"):
-            # Use cached IG function
-            attr, W = calculate_ig(st.session_state.model, st.session_state.X_raw)
+        
+        # FIX 2: We retrieve the data directly from the cache to avoid Session State bloat
+        if uploaded_file is not None:
+            df = load_data(uploaded_file)
+            X_raw = df.iloc[:, :-1].values.astype(np.float32)
+            headers = df.columns[:-1].values
             
-            avg_abs = np.mean(np.abs(attr), axis=0)
-            avg_raw = np.mean(attr, axis=0)
-            
-            st.session_state.attr = attr
-            st.session_state.W_vals = W 
-            st.session_state.avg_abs = avg_abs
-            st.session_state.avg_raw = avg_raw
-            st.session_state.ranking = np.argsort(avg_abs)[::-1]
-            st.session_state.step = 3
-            st.success("IG Calculation Finished!")
-            st.rerun() 
+            if st.button("🔍 Calculate Integrated Gradients"):
+                attr, W = calculate_ig(st.session_state.model, X_raw)
+                
+                avg_abs = np.mean(np.abs(attr), axis=0)
+                avg_raw = np.mean(attr, axis=0)
+                
+                st.session_state.attr = attr
+                st.session_state.W_vals = W 
+                st.session_state.avg_abs = avg_abs
+                st.session_state.avg_raw = avg_raw
+                st.session_state.ranking = np.argsort(avg_abs)[::-1]
+                st.session_state.step = 3
+                st.success("IG Calculation Finished!")
+                st.rerun() 
 
-        if 'attr' in st.session_state:
-            st.subheader("💾 Export Attribution Data", help = "Each data point (cell) has its own IG score for individual features (10 Features X 100 cells will report 1000 IG score.). Please use the swarm plot or download attribution/IG weight data to identify feature of interest as the focused feature for the next step.\n\n A feature can be positively or negatively attributing to the target response by context.\n A feature can be direct or inverse correlated to the target feature (high value of a feature (color: red) shows positive attribution (X-axis): direct correlation)")
-            save_col1, save_col2 = st.columns(2)
-            
-            df_attr = pd.DataFrame(st.session_state.attr, columns=st.session_state.headers)
-            df_w = pd.DataFrame(st.session_state.W_vals, columns=st.session_state.headers)
-            
-            save_col1.download_button(
-                label="📥 Download IG Attribution Values (CSV)",
-                data=df_attr.to_csv(index=False).encode('utf-8'),
-                file_name="ig_attribution_values.csv",
-                mime="text/csv",
-                help="Attribution = Input * Gradient weight for every data point."
-            )
-            
-            save_col2.download_button(
-                label="📥 Download IG Weights (CSV)",
-                data=df_w.to_csv(index=False).encode('utf-8'),
-                file_name="ig_w_sensitivity_weights.csv",
-                mime="text/csv",
-                help="weights of each features for each sample calculated by Integrated Gradient"
-            )
-            
-            st.divider()
+            if 'attr' in st.session_state:
+                st.subheader("💾 Export Attribution Data", help = "Each data point (cell) has its own IG score for individual features (10 Features X 100 cells will report 1000 IG score.). Please use the swarm plot or download attribution/IG weight data to identify feature of interest as the focused feature for the next step.\n\n A feature can be positively or negatively attributing to the target response by context.\n A feature can be direct or inverse correlated to the target feature (high value of a feature (color: red) shows positive attribution (X-axis): direct correlation)")
+                save_col1, save_col2 = st.columns(2)
+                
+                # Using the local headers variable instead of st.session_state
+                df_attr = pd.DataFrame(st.session_state.attr, columns=headers)
+                df_w = pd.DataFrame(st.session_state.W_vals, columns=headers)
+                
+                save_col1.download_button(
+                    label="📥 Download IG Attribution Values (CSV)",
+                    data=df_attr.to_csv(index=False).encode('utf-8'),
+                    file_name="ig_attribution_values.csv",
+                    mime="text/csv",
+                    help="Attribution = Input * Gradient weight for every data point."
+                )
+                
+                save_col2.download_button(
+                    label="📥 Download IG Weights (CSV)",
+                    data=df_w.to_csv(index=False).encode('utf-8'),
+                    file_name="ig_w_sensitivity_weights.csv",
+                    mime="text/csv",
+                    help="weights of each features for each sample calculated by Integrated Gradient"
+                )
+                
+                st.divider()
 
-            st.subheader("Top 30 Features (Global Importance)")
-            top_30_idx = st.session_state.ranking[:30]
+                st.subheader("Top 30 Features (Global Importance)")
+                top_30_idx = st.session_state.ranking[:30]
 
-            # Unpack the two formats returned by your new function
-            shap_png_bytes, shap_svg_bytes = get_cached_shap_plot(st.session_state.attr, st.session_state.X_raw, st.session_state.headers)
-            
-            # Show the PNG on the screen (PIL loves PNGs)
-            st.image(shap_png_bytes)
-            
-            # Feed the SVG behind the scenes into the download button
-            st.download_button(
-                label="📥 Download Top 30 Plot (SVG)", 
-                data=shap_svg_bytes, 
-                file_name="attr_plot.svg", 
-                mime="image/svg+xml" 
-            )
-            
-            # --- NEW UMAP SECTION REPLACING BAR PLOT ---
-            st.divider()
-            st.subheader("🌌 UMAP Cellular Projection by Feature Attribution")
-            
-            # 1. THE PROJECTION: Uses ALL raw features to determine the X/Y coordinates
-            embedding = get_cached_umap(st.session_state.X_raw)
-            
-            # 2. THE SEARCHABLE BOX: Streamlit's selectbox is natively searchable and scrollable!
-            default_feat = st.session_state.headers[st.session_state.ranking[0]]
-            selected_ig_feature = st.selectbox(
-                "Search and select a target feature to view its IG Attribution:", 
-                st.session_state.headers,
-                index=st.session_state.headers.tolist().index(default_feat),
-                help="Click and type to search for a specific feature."
-            )
-            
-            # 3. THE COLOR: Extract ONLY the selected feature's IG scores for the paint job
-            feat_idx = np.where(st.session_state.headers == selected_ig_feature)[0][0]
-            ig_scores = st.session_state.attr[:, feat_idx]
-            
-            # 4. Generate the UMAP Plot
-            fig_umap_ig, ax_umap_ig = plt.subplots(figsize=(10, 8))
-            
-            # Calculate symmetric bounds so 0.0 is ALWAYS perfectly white/gray
-            vmax = np.percentile(np.abs(ig_scores), 95)
-            if vmax == 0: vmax = 0.001 
-            
-            # --- NEW CUSTOM COLORMAP ---
-            # Your hex codes (ordered Blue -> Light Yellow -> Red)
-            custom_hex_colors = [
-            "#00441b", "#1b7837", "#5aae61", "#a6dba0", 
-            "#d9f0d3",  
-            "#e7d4e8", "#c2a5cf", "#9970ab", "#762a83", "#40004b"
-            ]
-            
-            my_cmap = LinearSegmentedColormap.from_list("custom_rdybl", custom_hex_colors)
+                # Using local X_raw and headers
+                shap_png_bytes, shap_svg_bytes = get_cached_shap_plot(st.session_state.attr, X_raw, headers)
+                
+                st.image(shap_png_bytes)
+                
+                st.download_button(
+                    label="📥 Download Top 30 Plot (SVG)", 
+                    data=shap_svg_bytes, 
+                    file_name="attr_plot.svg", 
+                    mime="image/svg+xml" 
+                )
+                
+                st.divider()
+                st.subheader("🌌 UMAP Cellular Projection by Feature Attribution")
+                
+                # Uses local X_raw
+                embedding = get_cached_umap(X_raw)
+                
+                # Uses local headers
+                default_feat = headers[st.session_state.ranking[0]]
+                selected_ig_feature = st.selectbox(
+                    "Search and select a target feature to view its IG Attribution:", 
+                    headers,
+                    index=headers.tolist().index(default_feat),
+                    help="Click and type to search for a specific feature."
+                )
+                
+                feat_idx = np.where(headers == selected_ig_feature)[0][0]
+                ig_scores = st.session_state.attr[:, feat_idx]
+                
+                fig_umap_ig, ax_umap_ig = plt.subplots(figsize=(10, 8))
+                
+                vmax = np.percentile(np.abs(ig_scores), 95)
+                if vmax == 0: vmax = 0.001 
+                
+                custom_hex_colors = [
+                "#00441b", "#1b7837", "#5aae61", "#a6dba0", 
+                "#d9f0d3",  
+                "#e7d4e8", "#c2a5cf", "#9970ab", "#762a83", "#40004b"
+                ]
+                
+                my_cmap = LinearSegmentedColormap.from_list("custom_rdybl", custom_hex_colors)
 
-            # Plot all cells, coloring them strictly by the selected feature's attribution
-            scatter = ax_umap_ig.scatter(
-                embedding[:, 0], embedding[:, 1], 
-                c=ig_scores, cmap=my_cmap, # <--- Apply your custom colormap here!
-                s=12, alpha=0.8, edgecolors='none', 
-                vmin=-vmax, vmax=vmax 
-            )
-            
-            cbar = plt.colorbar(scatter, ax=ax_umap_ig)
-            cbar.set_label(f'IG Attribution of {selected_ig_feature}', rotation=270, labelpad=15)
-            ax_umap_ig.set_title(f'UMAP Layout: All Features | Color: Attribution of {selected_ig_feature}')
-            ax_umap_ig.set_xlabel('UMAP 1')
-            ax_umap_ig.set_ylabel('UMAP 2')
-            
-            ax_umap_ig.spines['top'].set_visible(False)
-            ax_umap_ig.spines['right'].set_visible(False)
-            
-            st.pyplot(fig_umap_ig)
-            
-            # 5. UMAP Download Button
-            import io
-            buf_umap_ig = io.BytesIO()
-            fig_umap_ig.savefig(buf_umap_ig, format="svg", bbox_inches="tight")
-            st.download_button(
-                label="📥 Download IG UMAP Plot (SVG)",
-                data=buf_umap_ig.getvalue(),
-                file_name=f"umap_ig_{selected_ig_feature}.svg",
-                mime="image/svg+xml"
-            )
-            plt.close(fig_umap_ig) 
-            
-            st.divider()
+                scatter = ax_umap_ig.scatter(
+                    embedding[:, 0], embedding[:, 1], 
+                    c=ig_scores, cmap=my_cmap, 
+                    s=12, alpha=0.8, edgecolors='none', 
+                    vmin=-vmax, vmax=vmax 
+                )
+                
+                cbar = plt.colorbar(scatter, ax=ax_umap_ig)
+                cbar.set_label(f'IG Attribution of {selected_ig_feature}', rotation=270, labelpad=15)
+                ax_umap_ig.set_title(f'UMAP Layout: All Features | Color: Attribution of {selected_ig_feature}')
+                ax_umap_ig.set_xlabel('UMAP 1')
+                ax_umap_ig.set_ylabel('UMAP 2')
+                
+                ax_umap_ig.spines['top'].set_visible(False)
+                ax_umap_ig.spines['right'].set_visible(False)
+                
+                st.pyplot(fig_umap_ig)
+                
+                buf_umap_ig = io.BytesIO()
+                fig_umap_ig.savefig(buf_umap_ig, format="svg", bbox_inches="tight")
+                st.download_button(
+                    label="📥 Download IG UMAP Plot (SVG)",
+                    data=buf_umap_ig.getvalue(),
+                    file_name=f"umap_ig_{selected_ig_feature}.svg",
+                    mime="image/svg+xml"
+                )
+                plt.close(fig_umap_ig) 
+                
+                st.divider()
 
     else:
         st.warning("Please train a 'Multilayers Perception' model in Step 1 to process IG Attribution!")
@@ -547,6 +510,13 @@ with tab2:
 with tab3:
     if st.session_state.step >= 3:
         st.header("Step 3: Interaction & Logic Discovery", help = "Select a focused feature to explore the conditons (context) where the focused feature would be a very important feature to the target response.\n\n ex: Actin has been known to have a strong correlation with nuclear YAP. To explore how actin amount regulate YAP, selected 'actin amount' as interested feature, select other measured features (such as RhoA, E-cad, LATS1/2, cell morphology, mitochondria activity...) as attributing features.")
+        
+        # FIX: Load data from cache to avoid session state bloat!
+        if uploaded_file is not None:
+            df = load_data(uploaded_file)
+            X_raw = df.iloc[:, :-1].values.astype(np.float32)
+            headers = df.columns[:-1].values
+            target_name = df.columns[-1]
         
         if 'reg_data' not in st.session_state: st.session_state.reg_data = None
         if 'dt_data' not in st.session_state: st.session_state.dt_data = None
@@ -559,7 +529,7 @@ with tab3:
             with b_left:
                 target_prot = st.selectbox(
                     "Select focused feature", 
-                    st.session_state.headers[st.session_state.ranking],
+                    headers[st.session_state.ranking],
                     help="Select the feature you want to explain how it and other features integratively regulate target response. Default = The feature with No.1 absolute attribution ranking."
                 )
             
@@ -575,8 +545,8 @@ with tab3:
                 )
             
             with c_right:
-                all_prots = st.session_state.headers.tolist()
-                default_prots = st.session_state.headers[st.session_state.ranking[:30]].tolist()
+                all_prots = headers.tolist()
+                default_prots = headers[st.session_state.ranking[:30]].tolist()
                 if target_prot in default_prots: default_prots.remove(target_prot)
                 
                 selected_features = st.multiselect("Attributing Features", all_prots, default=default_prots, help="Investigate the role of these features in 'attributing the focused feature become important to target response'. ")
@@ -589,13 +559,13 @@ with tab3:
         if selected_features:
 
             # Prepare the mathematical arrays
-            names = st.session_state.headers
+            names = headers
             target_idx = np.where(names == target_prot)[0][0]
             y_ig_raw = st.session_state.attr[:, target_idx]
 
             reg_features = [f for f in selected_features if f != target_prot]
             reg_indices = [np.where(names == f)[0][0] for f in reg_features]
-            X_vals_reg = st.session_state.X_raw[:, reg_indices]
+            X_vals_reg = X_raw[:, reg_indices]
 
             if attr_direction == "Positive":
                 exp_threshold = np.percentile(y_ig_raw, percentile_val)
@@ -608,9 +578,9 @@ with tab3:
             df_export = pd.DataFrame()
             df_export[f"{target_prot}_Binary_Label"] = exp_y_binary
             df_export[f"{target_prot}_Attribution"] = y_ig_raw
-            df_export[f"{target_prot}_Raw"] = st.session_state.X_raw[:, target_idx]
+            df_export[f"{target_prot}_Raw"] = X_raw[:, target_idx]
             for f, idx in zip(reg_features, reg_indices):
-                df_export[f"{f}_Raw"] = st.session_state.X_raw[:, idx]
+                df_export[f"{f}_Raw"] = X_raw[:, idx]
 
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -630,7 +600,6 @@ with tab3:
                 )
             
             with action_col2:
-                # Changed from form_submit_button to standard button
                 run_reg = st.button("🚀 Run Linear Regression")
             
             with action_col3:
@@ -678,6 +647,7 @@ with tab3:
             ax_reg.set_xlabel(f"Actual {r_data['target']} IG Score")
             ax_reg.set_ylabel(f"Predicted {r_data['target']} IG")
             st.pyplot(fig_reg)
+            plt.close(fig_reg) # FIX: Prevents memory leak
 
         if st.session_state.dt_data is not None:
             dt = st.session_state.dt_data
@@ -690,7 +660,6 @@ with tab3:
                     help="A high score means these rules will generalize to new experiments. A low score means the tree is overfitting to the specific dataset."
                 )
 
-            
             fig_tree, ax = plt.subplots(figsize=(20, 10))
             plot_tree(dt['clf'], feature_names=dt['features'], filled=True, rounded=True, 
               precision=2, fontsize=6, impurity=False, node_ids=True, ax=ax)
@@ -699,26 +668,20 @@ with tab3:
                 match = re.search(r"value = \[(.*?)\]", t)
                 
                 if match:
-                    # --- INDENTATION FIXED BELOW ---
                     vals = match.group(1).split(", ")
                     y0= int(float(vals[0])) 
-                    y1 = int(round(float(vals[1]) / dt['weight'])) # Divide by the penalty weight
+                    y1 = int(round(float(vals[1]) / dt['weight'])) 
                     lines = t.split("\n")
                 
-                    # lines[0] is "node #X"
-                    # lines[1] is the condition if it contains "<="
                     if len(lines) > 1 and "<=" in lines[1]:
                         header = f"{lines[0]}\n{lines[1]}"
                     else:
-                        header = f"{lines[0]}" # It's a leaf node, no condition
+                        header = f"{lines[0]}" 
                     
                     text.set_text(f"{header}\nTotal: {y0+y1}\nTarget: {y1}")
 
-            # Don't forget to tell Streamlit to actually draw the customized plot!
             st.pyplot(fig_tree)
-
-            # (Removed the old Decision Tree image download button)
-            plt.close(fig_tree) # Clean up memory
+            plt.close(fig_tree) # FIX: Prevents memory leak
             
             # --- EXTRACT LIVE TP/FP COUNTS FOR THE TEXT FILE ---
             t_ = dt['clf'].tree_
@@ -743,7 +706,7 @@ with tab3:
             is_leaves = (t_.children_left == -1)
             positive_leaves = [i for i in range(t_.node_count) if is_leaves[i] and np.argmax(t_.value[i][0]) == 1]
             
-            X_tree_subset = st.session_state.X_raw[:, dt['indices']]
+            X_tree_subset = X_raw[:, dt['indices']]
             full_tree_paths = dt['clf'].apply(X_tree_subset)
             y_binary = dt['y_binary'] 
             
@@ -764,12 +727,11 @@ with tab3:
                     f"  - Logic: {rule_str}\n"
                     f"  - True Positives (TP): {tp} (High Attribution)\n"
                     f"  - False Positives (FP): {fp} (Noise/Other)\n"
-                    f"  - Precision: {precision:.1%}"
+                    f"  - Precision: {precision:.1%}\n"
                     f"  - Gini Impurity: {gini_score:.4f}"
                 )
                 
             leaf_context = "\n\n".join(leaf_summaries) if leaf_summaries else "No purely positive leaves found."
-            
             tree_rules = export_text(dt['clf'], feature_names=dt['features'])
 
             total_samples = len(y_binary)
@@ -779,7 +741,6 @@ with tab3:
             st.divider()
             st.markdown("### 🧠 Export LLM Interpretation Prompt")
             
-            # 1. Wrap inputs in a form to prevent typing lag
             with st.form("llm_prompt_form"):
                 export_col1, export_col2 = st.columns(2)
                 
@@ -797,10 +758,8 @@ with tab3:
                 with export_col2:
                     selected_cell_type = st.text_input("Cell Type / Study Tissue", placeholder="e.g., Blood cell, Liver tumor...")
 
-                # This button submits the form, preventing reruns on every keystroke
                 generate_btn = st.form_submit_button("⚙️ Generate Prompt File")
 
-            # 2. When the user clicks Generate, build the text and save to Session State
             if generate_btn:
                 cell_type_display = selected_cell_type if selected_cell_type.strip() != "" else "Not specifically provided"
                 
@@ -819,13 +778,11 @@ with tab3:
                     f"to form your hypothesis based on the logic. Use the full raw decision tree only as supplementary context; do not "
                     f"attempt to parse every individual branch.\n\n"
 
-
-
                     f"--- EXPERIMENT CONTEXT & DATA PIPELINE ---\n"
-                    f"1. Goal: Forming biological rationale and hypothesis based on the decision tree results to explain why {dt['target']} heavily attributes to the prediction of the present of {st.session_state.target_name}. Focused feature: '{dt['target']}'. Target response: '{st.session_state.target_name}'.\n"
+                    f"1. Goal: Forming biological rationale and hypothesis based on the decision tree results to explain why {dt['target']} heavily attributes to the prediction of the present of {target_name}. Focused feature: '{dt['target']}'. Target response: '{target_name}'.\n"
                     f"2. Upstream Model: A PyTorch nonlinear Multi-layer Perception model was trained on the raw dataset.\n"
                     f"3. Feature Selection: Integrated Gradients (IG) was applied. The top {len(dt['features'])} features with the highest Mean Absolute IG Attribution were selected.\n"
-                    f"4. Target response and Focus feature Correlation: {dt['corr']} correlation between {dt['target']} and {st.session_state.target_name}.\n"
+                    f"4. Target response and Focus feature Correlation: {dt['corr']} correlation between {dt['target']} and {target_name}.\n"
                     f"5. Label Generation: Samples were labeled as Class 1 ('High focused Attribution') if their IG score for {dt['target']} fell in the extreme 10% according to the analysis type. All other samples are Class 0. Analysis type: the {dt['direction']} Attribution Analysis focusing on conditions of {dt['target']}'s {dt['direction']} attribution effect.\n"
                     f"6. Tree Parameters and classification: max_depth=4, min_samples_leaf=5., class_weight= {{0: 1, 1: {dt['weight']}}}. The decision tree aims to find the conditions that contain most Class 1 data points and mininal Class 0 data points.\n\n"
                     
@@ -837,14 +794,12 @@ with tab3:
                     f"{tree_rules}\n"
                     
                     f"--- TASK ---\n"
-                    f"Based on the TARGET ZONES above, forming rationale and hypothesis of the feature relationship (pathways) to explain HOW features integratively regulate {st.session_state.target_name} with {dt['target']}. Highlight which zones are the most biologically robust based on the highest number of True Positives and Precision. Identify the findings into two categories: 1. the findings directly confirm the literature knowledge. 2. suggesting new testable mechanisms supported by literature. List the publications supporting the conclusions. Next, look into the second good zone and repeat the analysis (the conclusions for two highlight zones will be presented separately)."
+                    f"Based on the TARGET ZONES above, forming rationale and hypothesis of the feature relationship (pathways) to explain HOW features integratively regulate {target_name} with {dt['target']}. Highlight which zones are the most biologically robust based on the highest number of True Positives and Precision. Identify the findings into two categories: 1. the findings directly confirm the literature knowledge. 2. suggesting new testable mechanisms supported by literature. List the publications supporting the conclusions. Next, look into the second good zone and repeat the analysis (the conclusions for two highlight zones will be presented separately)."
                 )
                 
-                # Save it to Streamlit's memory so the download button doesn't vanish
                 st.session_state.ai_prompt_text = ai_readable_text
-                st.session_state.ai_prompt_filename = f"{dt['target']}-{st.session_state.target_name}_Interpretation_Prompt.txt"
+                st.session_state.ai_prompt_filename = f"{dt['target']}-{target_name}_Interpretation_Prompt.txt"
 
-            # 3. Show the Download button OUTSIDE the form if the text has been generated
             if "ai_prompt_text" in st.session_state:
                 st.success("✅ Prompt successfully generated! Click below to download.")
                 
@@ -856,35 +811,27 @@ with tab3:
                     use_container_width=True
                 )
 
-
             # --- UMAP Projection --- 
             st.divider()
             st.write("#### 🌌 UMAP Analysis")
             
-            # --- UMAP FEATURE SELECTION TOGGLE ---
-            # By default, we project UMAP using ONLY the features the Decision Tree used (dt['indices']).
-            # UNCOMMENT the line below if you want UMAP to look at top 30 background features instead:
-            # X_umap = st.session_state.X_raw[:, dt['indices']]
-            
-            # UNCOMMENT the line below if you want UMAP to look at ALL background features instead:
-            X_umap = st.session_state.X_raw 
+            X_umap = X_raw 
             
             embedding = get_cached_umap(X_umap)
             is_leaves = (t_.children_left == -1)
             positive_leaves = [i for i in range(t_.node_count) if is_leaves[i] and np.argmax(t_.value[i][0]) == 1]
             
-            X_tree_subset = st.session_state.X_raw[:, dt['indices']]
+            X_tree_subset = X_raw[:, dt['indices']]
             full_tree_paths = dt['clf'].apply(X_tree_subset)
             y_binary = dt['y_binary'] 
 
             umap_ctrl, umap_plot = st.columns([1, 2.5])
             
-
             with umap_ctrl:
                 color_mode = st.radio("UMAP Coloring Mode", ["Color by Feature value", "Color by Classification Result"])
                 
                 if color_mode == "Color by Feature value":
-                    selected_umap_feat = st.selectbox("Select Feature to visualize", st.session_state.headers)
+                    selected_umap_feat = st.selectbox("Select Feature to visualize", headers)
                 else:
                     if not positive_leaves:
                         st.warning("No purely positive leaf nodes found in this tree.")
@@ -915,12 +862,10 @@ with tab3:
                 fig_umap, ax_umap = plt.subplots(figsize=(10, 8))
                 
                 if color_mode == "Color by Feature value":
-                    feat_idx = np.where(st.session_state.headers == selected_umap_feat)[0][0]
-                    c_values = st.session_state.X_raw[:, feat_idx]
+                    feat_idx = np.where(headers == selected_umap_feat)[0][0]
+                    c_values = X_raw[:, feat_idx]
                     v_cap = np.percentile(c_values, 95) 
                     
-                    # --- NEW CUSTOM SEQUENTIAL COLORMAP ---
-                    # Your hex codes (ordered Light Blue -> Dark Blue)
                     blues_hex_colors = [
                          "#deebf7", "#c6dbef", 
                         "#9ecae1", "#6baed6", "#4292c6", 
@@ -928,7 +873,6 @@ with tab3:
                     ]
                     blues_cmap = LinearSegmentedColormap.from_list("custom_blues", blues_hex_colors)
                     
-                    # Apply the custom blues colormap here
                     scatter = ax_umap.scatter(
                         embedding[:, 0], embedding[:, 1], 
                         c=c_values, cmap=blues_cmap, 
@@ -966,7 +910,6 @@ with tab3:
                 ax_umap.spines['right'].set_visible(False)
                 st.pyplot(fig_umap)
 
-                # --- ADD UMAP DOWNLOAD BUTTON HERE ---
                 buf_umap = io.BytesIO()
                 fig_umap.savefig(buf_umap, format="svg", bbox_inches="tight")
                 if color_mode == "Color by Feature value":
@@ -983,8 +926,8 @@ with tab3:
                         file_name=f"umap_nodes_{selected_node}.svg",
                         mime="image/svg+xml"
                     )
-
-                # Assuming your UMAP or Swarm plot figure is named 'fig'
+                
+                plt.close(fig_umap) # FIX: Prevents memory leak
 
             # --- NETWORK PLOT ---
             st.divider()
@@ -1002,17 +945,19 @@ with tab3:
                                 w = int(t_.n_node_samples[child])
                                 if G.has_edge(p_feat, c_feat): G[p_feat][c_feat]['weight'] += w
                                 else: G.add_edge(p_feat, c_feat, weight=w)
-                        build_net(child)
+                            build_net(child)
             build_net(0)
 
             if len(G.edges) > 0:
-                fig_net = get_cached_network_plot(G)
-                st.pyplot(fig_net)
-                
-                buf_net = io.BytesIO()
-                fig_net.savefig(buf_net, format="svg", bbox_inches="tight")
-                st.download_button(label="📥 Download Network Plot (SVG)", data=buf_net.getvalue(), file_name="interaction_network.svg",mime="image/svg+xml")
-
+                # FIX: Handle both rendering PNG and downloading SVG!
+                png_bytes, svg_bytes = get_cached_network_plot(G)
+                st.image(png_bytes)
+                st.download_button(
+                    label="📥 Download Network Plot (SVG)", 
+                    data=svg_bytes, 
+                    file_name="interaction_network.svg",
+                    mime="image/svg+xml"
+                )
 
     else:
         st.warning("Please finish Step 2 first!")
