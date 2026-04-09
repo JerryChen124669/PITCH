@@ -109,9 +109,10 @@ def load_data(file):
     return pd.read_excel(file)
 
 @st.cache_data
+@track_ram
 def get_cached_shap_plot(attr, X_raw, headers):
     fig = plt.figure(figsize=(10, 8))
-    shap.summary_plot(attr, X_raw, feature_names=headers, max_display=30, plot_size=None, show=False, color_bar_label='Feature value')
+    .summary_plot(attr, X_raw, feature_names=headers, max_display=30, plot_size=None, show=False, color_bar_label='Feature value')
     plt.subplots_adjust(left=0.3)
     plt.xlabel('Integrated Gradient Attribution Value')
     plt.tight_layout()
@@ -297,13 +298,13 @@ with tab1:
         X_raw = df.iloc[:, :-1].values.astype(np.float32)
         y_raw = df.iloc[:, -1].values.astype(np.float32)
 
-        st.info(f"Loaded: **{target_name}** with {X_raw.shape[1]} features.")
+        st.info(f"Loaded: **{target_name}** with {X_raw.e[1]} features.")
 
         if st.button(f"🚀 Start {selected_model_type} Training"):
             X_train, X_test, y_train, y_test = train_test_split(X_raw, y_raw, test_size=0.2, random_state=seed)
             
             model = train_pytorch_model(
-                selected_model_type, X_raw.shape[1], hidden_size, dropout, 
+                selected_model_type, X_raw.e[1], hidden_size, dropout, 
                 lr, weight_decay, epochs, seed, X_train, y_train
             )
             
@@ -460,7 +461,7 @@ with tab2:
                 top_30_idx = st.session_state.ranking[:30]
 
                 # Using local X_raw and headers
-                shap_png_bytes, shap_svg_bytes = get_cached_shap_plot(st.session_state.attr, X_raw, headers)
+                _png_bytes, _svg_bytes = get_cached_shap_plot(st.session_state.attr, X_raw, headers)
                 
                 st.image(shap_png_bytes)
                 
