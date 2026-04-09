@@ -112,7 +112,7 @@ def load_data(file):
 @track_ram
 def get_cached_shap_plot(attr, X_raw, headers):
     fig = plt.figure(figsize=(10, 8))
-    .summary_plot(attr, X_raw, feature_names=headers, max_display=30, plot_size=None, show=False, color_bar_label='Feature value')
+    shap.summary_plot(attr, X_raw, feature_names=headers, max_display=30, plot_size=None, show=False, color_bar_label='Feature value')
     plt.subplots_adjust(left=0.3)
     plt.xlabel('Integrated Gradient Attribution Value')
     plt.tight_layout()
