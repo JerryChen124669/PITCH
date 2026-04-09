@@ -10,3 +10,4 @@ networkx
 shap
 umap-learn
 openpyxl
+psutil
